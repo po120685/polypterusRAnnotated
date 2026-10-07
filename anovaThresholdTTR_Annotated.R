@@ -1,10 +1,12 @@
 # =========================================================
 # TIME TO RECOVERY (TTR) ANALYSIS — THRESHOLD METHOD
+# TWO-WAY ANOVA VERSION (Treatment x Exercise)
 # =========================================================
 # PURPOSE
 #   Estimate how long each fish takes to return to near-resting
-#   oxygen consumption (MO2) after exercise, then compare that
-#   recovery time among four treatment groups.
+#   oxygen consumption (MO2) after exercise, then test whether
+#   recovery time depends on rearing environment (Treatment),
+#   exercise training (Exercise), or their interaction.
 #
 # RECOVERY DEFINITION
 #   A fish is "recovered" at the first minute where:
@@ -12,54 +14,60 @@
 #       MO2 <= resting_MO2 * threshold
 #
 #   AND every later minute in the window also stays at or
-#   below that threshold (i.e., recovery must be sustained,
-#   not a single dip).
+#   below that threshold (sustained recovery, not a single dip).
+#
+# STATISTICAL DESIGN
+#   2 x 2 factorial:
+#     Treatment: terrestrial vs aquatic (rearing environment)
+#     Exercise : ramp vs noRamp         (trained vs untrained)
+#   Model: response ~ Treatment * Exercise
+#   Tests: Treatment main effect, Exercise main effect,
+#          Treatment x Exercise interaction
+#   Sums of squares: Type III (robust to unequal group sizes)
 #
 # OUTPUTS
 #   - One TTR value per fish
-#   - One-way ANOVA comparing TTR among groups
+#   - Sample size per cell
+#   - Two-way ANOVA table (Type III)
 #   - Assumption checks (normality, equal variance)
-#   - Tukey-adjusted pairwise comparisons
-#   - Boxplot of TTR by group
+#   - Estimated marginal means + Tukey-adjusted comparisons
+#   - Boxplot and interaction plot
 #
-# NOTES / CAVEATS
-#   - Fish that never meet the criterion within the window
-#     get TTR = NA and are DROPPED before the ANOVA. Because
-#     these are the slowest recoverers, excluding them can
-#     bias group means; a survival analysis (treating them
-#     as censored at 30 min) avoids this.
+# CAVEATS
+#   - Fish that never recover within the window get TTR = NA
+#     and are DROPPED before the ANOVA. These are the slowest
+#     recoverers, so excluding them can bias group means.
 #   - A fish whose only below-threshold reading is the final
-#     minute (30) still counts as recovered at minute 30,
-#     because there are no later points left to check.
+#     minute still counts as recovered at that minute.
 # =========================================================
 
 cat("\f")       # Clear the R console (RStudio)
-rm(list = ls()) # Remove all objects from the workspace for a clean run
+rm(list = ls()) # Remove all objects for a clean run
 
 # =========================================================
 # LOAD PACKAGES
 # =========================================================
 
 library(tidyverse) # Data wrangling (dplyr) and plotting (ggplot2)
-library(car)       # leveneTest() for homogeneity of variance
-library(emmeans)   # Estimated marginal means + Tukey post hoc tests
+library(car)       # Anova() for Type III SS; leveneTest()
+library(emmeans)   # Estimated marginal means + post hoc tests
 
 # =========================================================
 # USER SETTINGS
 # =========================================================
 
 # Input file: one row per fish per minute of recovery.
-# Expected columns include: Tank_ID, Mode, Treatment, Exercise,
+# Required columns: Tank_ID, Mode, Treatment, Exercise,
 # minute, mo2, resting_mo2.
-data_file <- "recoverySpreadsheet1min.csv"
+data_file <- "/Users/theopo/Documents/MATLAB/polyp/dataOutputPolyp/valeSend/completeMetaData/recoverySpreadsheet1min.csv"
 
 # ---------------------------------
 # MODE TO ANALYZE
 # ---------------------------------
-# Run the script once per locomotor mode by toggling these lines.
+# Run once per locomotor mode by toggling these lines.
 
-selected_mode <- "walking"
-#selected_mode <- "swimming"
+#selected_mode <- "walking"
+selected_mode <- "swimming"
 
 # ---------------------------------
 # RECOVERY THRESHOLD
@@ -70,11 +78,29 @@ selected_mode <- "walking"
 
 threshold <- 1.10
 
+# ---------------------------------
+# RECOVERY WINDOW (minutes)
+# ---------------------------------
+# TTR cannot exceed this value; fish not recovered by
+# this minute get TTR = NA.
+
+max_minute <- 30
+
+# ---------------------------------
+# LOG TRANSFORM?
+# ---------------------------------
+# TRUE  = analyze log(TTR)
+# FALSE = analyze raw TTR (minutes)
+# Default reproduces the earlier analysis: log for swimming,
+# raw for walking. For a consistent analysis across modes,
+# set this to a single TRUE or FALSE.
+
+use_log <- selected_mode == "swimming"
+
 # =========================================================
 # GROUP COLORS
 # =========================================================
-# Fixed colors so groups look the same across all figures.
-# Terrestrial-reared groups = browns; aquatic-reared = blues.
+# Terrestrial-reared = browns; aquatic-reared = blues.
 
 grpColors <- c(
   "TT" = "#8B4513",   # dark brown  (terrestrial, ramp)
@@ -84,91 +110,63 @@ grpColors <- c(
 )
 
 # =========================================================
-# LOAD DATA
+# CONTRASTS FOR TYPE III TESTS
+# =========================================================
+# Type III sums of squares are only meaningful with
+# sum-to-zero ("effects") contrasts. R's default
+# (treatment contrasts) gives misleading Type III results.
+
+options(contrasts = c("contr.sum", "contr.poly"))
+
+# =========================================================
+# LOAD AND FILTER DATA
 # =========================================================
 
 df <- read.csv(data_file)
 
-# =========================================================
-# FILTER MODE
-# =========================================================
-# Keep only rows for the locomotor mode chosen above.
-
 df <- df %>%
-  filter(Mode == selected_mode)
-
-# =========================================================
-# LIMIT TO FIRST 30 MINUTES
-# =========================================================
-# Restrict the recovery window to minutes 0–30. TTR can
-# therefore never exceed 30, and fish that haven't recovered
-# by minute 30 will be NA.
-
-df <- df %>%
-  filter(minute <= 30)
+  filter(Mode == selected_mode,   # keep selected locomotor mode
+         minute <= max_minute)    # restrict to recovery window
 
 # =========================================================
 # CLEAN DATA
 # =========================================================
-# Convert ID and design variables to factors so R treats
-# them as categories rather than text/numbers.
+# Convert design variables to factors with a fixed level order
+# so tables and plots are consistent.
 
 df$Tank_ID   <- factor(df$Tank_ID)
-df$Treatment <- factor(df$Treatment)
-df$Exercise  <- factor(df$Exercise)
+df$Treatment <- factor(df$Treatment, levels = c("terrestrial", "aquatic"))
+df$Exercise  <- factor(df$Exercise,  levels = c("ramp", "noRamp"))
 
 # =========================================================
-# CREATE GROUP VARIABLE
+# CREATE GROUP VARIABLE (for plotting / labels)
 # =========================================================
-# Combine the two design factors (Treatment x Exercise) into
-# a single 4-level grouping variable:
-#   First letter  = rearing environment (T = terrestrial, A = aquatic)
-#   Second letter = exercise (T = trained/ramp, U = untrained/noRamp)
-
-df$group <- case_when(
-  
-  df$Treatment == "terrestrial" &
-    df$Exercise == "ramp" ~ "TT",
-  
-  df$Treatment == "terrestrial" &
-    df$Exercise == "noRamp" ~ "TU",
-  
-  df$Treatment == "aquatic" &
-    df$Exercise == "ramp" ~ "AT",
-  
-  df$Treatment == "aquatic" &
-    df$Exercise == "noRamp" ~ "AU"
-)
-
-# Set a fixed level order so tables and plots always list
-# groups as TT, TU, AT, AU.
-df$group <- factor(
-  df$group,
-  levels = c("TT", "TU", "AT", "AU")
-)
-
-# =========================================================
-# CALCULATE THRESHOLD
-# =========================================================
-# Each fish's recovery cutoff is based on its OWN resting
-# MO2, so the criterion is individual-specific.
+# First letter  = rearing (T = terrestrial, A = aquatic)
+# Second letter = exercise (T = trained/ramp, U = untrained/noRamp)
+# The ANOVA uses Treatment and Exercise directly; 'group' is
+# just a convenient label for plots and tables.
 
 df <- df %>%
-  
   mutate(
-    recovery_threshold = resting_mo2 * threshold
+    group = case_when(
+      Treatment == "terrestrial" & Exercise == "ramp"   ~ "TT",
+      Treatment == "terrestrial" & Exercise == "noRamp" ~ "TU",
+      Treatment == "aquatic"     & Exercise == "ramp"   ~ "AT",
+      Treatment == "aquatic"     & Exercise == "noRamp" ~ "AU"
+    ),
+    group = factor(group, levels = c("TT", "TU", "AT", "AU"))
   )
 
 # =========================================================
-# DETERMINE RECOVERY STATUS
+# FLAG RECOVERY AT EACH MINUTE
 # =========================================================
-# For every minute, flag whether MO2 is at/below the cutoff.
-# TRUE = below threshold at that minute; FALSE = still elevated.
+# Each fish's cutoff is based on its OWN resting MO2.
+# recovered = TRUE when MO2 is at/below the cutoff.
 
 df <- df %>%
-  
   mutate(
-    recovered = mo2 <= recovery_threshold
+    recovery_threshold = resting_mo2 * threshold,
+    recovered          = mo2 <= recovery_threshold
   )
 
 # =========================================================
@@ -176,235 +174,248 @@ df <- df %>%
 # =========================================================
 # For each fish, step through minutes in order and find the
 # FIRST minute from which all remaining minutes are recovered.
-# That minute is the fish's TTR. If no such minute exists,
-# TTR stays NA (never recovered within 30 min).
+# If none, TTR = NA (did not recover within the window).
 
-TTR_results <- list()            # Container for one row per fish
+TTR_results <- list()
 
-fish_ids <- unique(df$Tank_ID)   # Each Tank_ID = one fish
-
-for(f in fish_ids) {
+for(f in unique(df$Tank_ID)) {
   
-  # Pull this fish's data, sorted by time
+  # This fish's data, sorted by time
   fish_df <- df %>%
-    
     filter(Tank_ID == f) %>%
-    
     arrange(minute)
   
-  # Vector of TRUE/FALSE recovery flags across minutes
   recovered_vec <- fish_df$recovered
-  
-  # Default: not recovered
   TTR <- NA
   
-  for(i in 1:length(recovered_vec)) {
+  for(i in seq_along(recovered_vec)) {
     
-    # Recovery flags from minute i to the end of the window
-    current_and_remaining <-
-      recovered_vec[i:length(recovered_vec)]
-    
-    # Recovery only counts if ALL remaining points stay
-    # recovered (sustained recovery). The first i where this
-    # holds is the TTR; stop searching once found.
-    # NOTE: at the last minute only one point remains, so a
-    # single low final reading is enough to give TTR = 30.
-    
-    if(all(current_and_remaining == TRUE)) {
-      
+    # Sustained recovery: this minute AND all later minutes
+    # must be below threshold.
+    if(all(recovered_vec[i:length(recovered_vec)])) {
       TTR <- fish_df$minute[i]
-      
       break
     }
   }
   
-  # Keep the fish's first row (for its ID/group info)
-  # and attach the TTR value
-  temp <- fish_df[1, ]
-  
-  temp$TTR <- TTR
-  
-  TTR_results[[as.character(f)]] <- temp
+  # Keep identifying info + TTR
+  TTR_results[[as.character(f)]] <- fish_df[1, ] %>%
+    select(Tank_ID, Treatment, Exercise, group) %>%
+    mutate(TTR = TTR)
 }
 
-# =========================================================
-# COMBINE TTR TABLE
-# =========================================================
-# Stack the per-fish rows into one data frame.
+TTR_all <- bind_rows(TTR_results)
 
-TTR_df <- bind_rows(TTR_results)
+print(TTR_all)  # NA = did not recover within the window
 
-# Keep only identifying columns and the TTR result
-TTR_df <- TTR_df %>%
-  
-  select(
-    Tank_ID,
-    Treatment,
-    Exercise,
-    group,
-    TTR
+# =========================================================
+# RECOVERY SUMMARY (BEFORE DROPPING NAs)
+# =========================================================
+# How many fish per group recovered vs not. Useful context
+# because non-recovered fish are excluded from the ANOVA.
+
+recovery_summary <- TTR_all %>%
+  group_by(group) %>%
+  summarise(
+    n_total     = n(),
+    n_recovered = sum(!is.na(TTR)),
+    n_not_recov = sum(is.na(TTR)),
+    .groups = "drop"
   )
 
-print(TTR_df)  # Inspect: NA = did not recover within 30 min
+cat("\n--- Recovery summary ---\n")
+print(recovery_summary)
 
 # =========================================================
-# REMOVE NAs
+# REMOVE NON-RECOVERED FISH
 # =========================================================
-# Drop fish that never recovered. The ANOVA below is
-# therefore run ONLY on fish that recovered within the window.
-# (See caveat in header: this excludes the slowest fish.)
 
-TTR_df <- TTR_df %>%
-  
+TTR_df <- TTR_all %>%
   filter(!is.na(TTR))
 
-# =========================================================
-# CONDITIONAL LOG TRANSFORM
-# =========================================================
-# Swimming TTR is log-transformed (intended to improve
-# normality of residuals); walking TTR is analyzed raw.
-# NOTE: if reporting both modes, consider using the same
-# scale for both so the analyses are directly comparable.
+# Sample size per cell actually entering the ANOVA.
+# Every cell needs n >= 2 to estimate the interaction.
+cat("\n--- Cell sizes in ANOVA ---\n")
+print(table(TTR_df$Treatment, TTR_df$Exercise))
 
-if(selected_mode == "swimming") {
-  
-  cat("\nApplying log transform to swimming TTR\n")
-  
+# =========================================================
+# RESPONSE VARIABLE
+# =========================================================
+
+if(use_log) {
+  cat("\nAnalyzing log(TTR)\n")
   TTR_df$response <- log(TTR_df$TTR)
-  
 } else {
-  
-  cat("\nUsing raw TTR for walking\n")
-  
+  cat("\nAnalyzing raw TTR (minutes)\n")
   TTR_df$response <- TTR_df$TTR
 }
 
 # =========================================================
-# ONE-WAY ANOVA
+# TWO-WAY ANOVA
 # =========================================================
-# Tests whether mean TTR differs among the four groups.
-# NOTE: this is a ONE-way ANOVA on the combined 'group'
-# factor. To test rearing and exercise effects separately
-# (and their interaction), use instead:
-#     aov(response ~ Treatment * Exercise, data = TTR_df)
+# Fit the full factorial model: main effects of Treatment
+# and Exercise plus their interaction.
 
 anova_model <- aov(
-  response ~ group,
+  response ~ Treatment * Exercise,
   data = TTR_df
 )
 
-summary(anova_model)  # F statistic and p-value for the group effect
+# Type III sums of squares via car::Anova().
+# Each effect is tested after adjusting for all others,
+# so results don't depend on the order of terms, which
+# matters here because group sizes are unequal.
+# (Base summary(anova_model) would give order-dependent
+# Type I results, so it is not used.)
+cat("\n--- Two-way ANOVA (Type III SS) ---\n")
+anova_table <- Anova(anova_model, type = 3)
+print(anova_table)
+
+# HOW TO READ IT
+#   Treatment          : do terrestrial vs aquatic fish differ
+#                        in TTR (averaged over exercise)?
+#   Exercise           : do ramp vs noRamp fish differ
+#                        (averaged over rearing)?
+#   Treatment:Exercise : does the exercise effect depend on
+#                        rearing environment?
+#   Ignore the (Intercept) row: it only tests whether mean
+#   TTR differs from zero.
+#   Report each effect as F(df_effect, df_residual), p.
 
 # =========================================================
 # ASSUMPTION TESTS
 # =========================================================
 
 # ---------------------------------
-# NORMALITY
+# NORMALITY OF RESIDUALS
 # ---------------------------------
-# Shapiro–Wilk test on the model residuals.
-# p > 0.05 -> no evidence residuals depart from normality.
-# (Low power with small samples; also check a Q-Q plot.)
+# Shapiro–Wilk: p > 0.05 -> no evidence of non-normality.
+# Low power with small n, so also inspect the Q-Q plot.
 
-shapiro_result <- shapiro.test(
-  residuals(anova_model)
-)
+cat("\n--- Shapiro-Wilk on residuals ---\n")
+print(shapiro.test(residuals(anova_model)))
 
-print(shapiro_result)
+qqnorm(residuals(anova_model), main = "Q-Q plot of residuals")
+qqline(residuals(anova_model))
 
 # ---------------------------------
 # HOMOGENEITY OF VARIANCE
 # ---------------------------------
-# Levene's test (median-centered) for equal variance
-# across groups.
-# p > 0.05 -> no evidence variances differ among groups.
+# Levene's test (median-centered) across the four cells.
+# p > 0.05 -> no evidence variances differ.
 
-levene_result <- leveneTest(
-  response ~ group,
-  data = TTR_df
-)
-
-print(levene_result)
+cat("\n--- Levene's test ---\n")
+print(leveneTest(response ~ Treatment * Exercise, data = TTR_df))
 
 # =========================================================
 # POST HOC TESTS
 # =========================================================
-# Estimated marginal (model-based) means for each group,
-# plus all pairwise group differences with Tukey adjustment
-# for multiple comparisons.
-# For the swimming (log) model, estimates are on the log scale;
-# add type = "response" to emmeans() to back-transform.
+# Estimated marginal means (model-based group means).
+# If use_log = TRUE, type = "response" back-transforms the
+# means to minutes (geometric means); contrasts become ratios.
 
-emmeans_results <- emmeans(
-  anova_model,
-  pairwise ~ group
-)
+emm_type <- if(use_log) "response" else "link"
 
-print(emmeans_results)
+# ---------------------------------
+# MAIN EFFECTS
+# ---------------------------------
+# Only interpretable on their own if the interaction is
+# NOT significant. Each is averaged over the other factor.
+
+cat("\n--- Treatment main effect ---\n")
+print(emmeans(anova_model, pairwise ~ Treatment, type = emm_type))
+
+cat("\n--- Exercise main effect ---\n")
+print(emmeans(anova_model, pairwise ~ Exercise, type = emm_type))
+
+# ---------------------------------
+# SIMPLE EFFECTS
+# ---------------------------------
+# Use these if the interaction IS significant: the effect
+# of exercise within each rearing environment, and vice versa.
+
+cat("\n--- Exercise effect within each Treatment ---\n")
+print(emmeans(anova_model, pairwise ~ Exercise | Treatment, type = emm_type))
+
+cat("\n--- Treatment effect within each Exercise ---\n")
+print(emmeans(anova_model, pairwise ~ Treatment | Exercise, type = emm_type))
+
+# ---------------------------------
+# ALL FOUR CELLS
+# ---------------------------------
+# All 6 pairwise comparisons among TT, TU, AT, AU with
+# Tukey adjustment (equivalent to the earlier one-way post hoc).
+
+cat("\n--- All pairwise cell comparisons (Tukey) ---\n")
+print(emmeans(anova_model, pairwise ~ Treatment * Exercise, type = emm_type))
 
 # =========================================================
-# SAVE RESULTS
+# SAVE RESULTS (optional)
 # =========================================================
-# Uncomment to export the per-fish TTR table, e.g.
-# "TTR_threshold_walking.csv".
 
-#write.csv(
-#TTR_df,
-#paste0(
-#"TTR_threshold_",
-#selected_mode,
-#".csv"
-#),
-#row.names = FALSE
-#)
+#write.csv(TTR_all,
+#          paste0("TTR_threshold_", selected_mode, ".csv"),
+#          row.names = FALSE)
 
 # =========================================================
 # BOXPLOT
 # =========================================================
-# Raw TTR (minutes, untransformed) by group, with individual
-# fish overlaid as jittered points.
+# Raw TTR (minutes) by group with individual fish overlaid.
 
-ggplot(TTR_df,
-       aes(x = group,
-           y = TTR,
-           fill = group)) +
+p_box <- ggplot(TTR_df,
+                aes(x = group, y = TTR, fill = group)) +
   
-  # Box = median and interquartile range per group.
-  # Outliers hidden here because every fish is shown as a point.
-  geom_boxplot(
-    width = 0.7,
-    alpha = 0.85,
-    outlier.shape = NA
-  ) +
+  # Median and IQR per group; outliers hidden because
+  # every fish is plotted as a point
+  geom_boxplot(width = 0.7, alpha = 0.85, outlier.shape = NA) +
   
-  # Individual fish, spread horizontally so points don't overlap
-  geom_jitter(
-    width = 0.12,
-    size = 2.5,
-    alpha = 0.8
-  ) +
+  # Individual fish
+  geom_jitter(width = 0.12, height = 0, size = 2.5, alpha = 0.8) +
   
-  # Apply the custom group colors to box fills
   scale_fill_manual(values = grpColors) +
-  
-  # NOTE: no 'color' aesthetic is mapped, so this line does
-  # nothing and triggers a harmless warning. Delete it, or add
-  # aes(color = group) to geom_jitter() to color the points.
-  scale_color_manual(values = grpColors) +
   
   theme_classic(base_size = 14) +
   
-  labs(
-    title = paste(
-      "Time To Recovery (TTR)",
-      "|",
-      selected_mode
-    ),
-    x = "",
-    y = "TTR (minutes)"
-  ) +
+  labs(title = paste("Time To Recovery (TTR) |", selected_mode),
+       x = "", y = "TTR (minutes)") +
   
-  # Legend is redundant since groups are labeled on the x-axis
-  theme(
-    legend.position = "none"
+  theme(legend.position = "none")
+
+print(p_box)
+
+# =========================================================
+# INTERACTION PLOT
+# =========================================================
+# Mean TTR (± SE) for each Treatment x Exercise cell.
+# Parallel lines = no interaction; crossing or diverging
+# lines = the exercise effect differs by rearing environment.
+
+interaction_summary <- TTR_df %>%
+  group_by(Treatment, Exercise) %>%
+  summarise(
+    mean_TTR = mean(TTR),
+    se_TTR   = sd(TTR) / sqrt(n()),
+    .groups  = "drop"
   )
+
+p_int <- ggplot(interaction_summary,
+                aes(x = Exercise, y = mean_TTR,
+                    color = Treatment, group = Treatment)) +
+  
+  geom_point(size = 3, position = position_dodge(width = 0.15)) +
+  geom_line(position = position_dodge(width = 0.15)) +
+  geom_errorbar(aes(ymin = mean_TTR - se_TTR,
+                    ymax = mean_TTR + se_TTR),
+                width = 0.1,
+                position = position_dodge(width = 0.15)) +
+  
+  scale_color_manual(values = c("terrestrial" = "#8B4513",
+                                "aquatic"     = "#1A4C99")) +
+  
+  theme_classic(base_size = 14) +
+  
+  labs(title = paste("Treatment x Exercise |", selected_mode),
+       x = "Exercise", y = "Mean TTR (minutes ± SE)",
+       color = "Rearing")
+
+print(p_int)
