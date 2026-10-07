@@ -59,7 +59,7 @@ library(emmeans)   # Estimated marginal means + post hoc tests
 # Input file: one row per fish per minute of recovery.
 # Required columns: Tank_ID, Mode, Treatment, Exercise,
 # minute, mo2, resting_mo2.
-data_file <- "/Users/theopo/Documents/MATLAB/polyp/dataOutputPolyp/valeSend/completeMetaData/recoverySpreadsheet1min.csv"
+data_file <- "recoverySpreadsheet1min.csv"
 
 # ---------------------------------
 # MODE TO ANALYZE
