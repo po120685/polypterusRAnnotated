@@ -51,7 +51,7 @@ library(emmeans)   # Estimated marginal means + Tukey post hoc tests
 # Input file: one row per fish per minute of recovery.
 # Expected columns include: Tank_ID, Mode, Treatment, Exercise,
 # minute, mo2, resting_mo2.
-data_file <- "recovery_spreadsheet_1min.csv"
+data_file <- "recoverySpreadsheet1min.csv"
 
 # ---------------------------------
 # MODE TO ANALYZE
